@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Best Outdoor Times</title>
+    <style>
+        :root {
+            --bg-color: #f0f4f8;
+            --text-color: #203040;
+            --card-bg: #fff;
+            --good-bg: #2ecc7140;
+            --good-border: #27ae60;
+            --good-text: #14532d;
+            --header-bg: #27ae60;
+        }
+
+        .dark {
+            --bg-color: #1a202c;
+            --text-color: #e2e8f0;
+            --card-bg: #2d3748;
+            --good-bg: #38a16940;
+            --good-border: #38a169;
+            --good-text: #68d391;
+            --header-bg: #38a169;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: sans-serif;
+            background: var(--bg-color);
+            color: var(--text-color);
+            transition: all 0.3s ease;
+        }
+
+        header {
+            position: sticky;
+            top: 0;
+            background: var(--card-bg);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.5rem 1rem;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            z-index: 10;
+        }
+
+        #controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        select,
+        button {
+            padding: 0.5rem;
+            cursor: pointer;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: var(--card-bg);
+            color: var(--text-color);
+        }
+
+        button:hover {
+            opacity: 0.8;
+        }
+
+        section {
+            padding: 1rem;
+        }
+
+        .good-header {
+            background: var(--header-bg);
+            color: #fff;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+        }
+
+        .good-header h2 {
+            margin: 0;
+            font-size: 1.2rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 12px;
+        }
+
+        .slot {
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.85rem;
+            background: var(--good-bg);
+            border: 2px solid var(--good-border);
+            color: var(--good-text);
+            transition: transform 0.2s ease;
+        }
+
+        .slot:hover {
+            transform: translateY(-2px);
+        }
+
+        .icon {
+            font-size: 1.8rem;
+            display: block;
+            margin-bottom: 6px;
+        }
+
+        .time {
+            font-weight: bold;
+            font-size: 1rem;
+            margin-bottom: 4px;
+        }
+
+        .details {
+            font-size: 0.75rem;
+            line-height: 1.2;
+            opacity: 0.8;
+        }
+
+        .no-times {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-color);
+            opacity: 0.6;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div id="summary">Locating…</div>
+        <div id="controls">
+            <input id="locInput" type="text" placeholder="Enter city or address"
+                style="padding:.5rem;border:1px solid #ccc;border-radius:4px">
+            <button id="locBtn">Go</button>
+            <button id="themeToggle">🌙 Dark</button>
+        </div>
+    </header>
+
+    <section>
+        <div class="good-header">
+            <h2 id="goodCount">🏃‍♂️ Best Times for Outdoor Activities</h2>
+        </div>
+        <div id="goodGrid" class="grid"></div>
+        <div id="noTimes" class="no-times" style="display:none;">
+            No optimal times found in the next 24 hours. Check back later!
+        </div>
+    </section>
+
+    <script>
+        const getIcon = (t, uv, prec) => {
+            if (prec > 20) return '🌧️';
+            if (uv > 6) return '🔥';
+            if (t > 25) return '🌡️';
+            if (t < 15) return '🧥';
+            return '☀️';
+        };
+
+        const isGood = (t, h, uv, w, p) => t >= 10 && t <= 25 && h < 70 && uv < 4 && w < 8 && p < 20;
+
+        const goodGrid = document.getElementById('goodGrid');
+        const status = document.getElementById('summary');
+        const goodCount = document.getElementById('goodCount');
+        const noTimes = document.getElementById('noTimes');
+        const themeToggle = document.getElementById('themeToggle');
+        const locInput = document.getElementById('locInput');
+        const locBtn = document.getElementById('locBtn');
+
+        // Dark mode
+        if (localStorage.getItem('darkMode') === 'true') document.body.classList.add('dark');
+        themeToggle.onclick = () => {
+            document.body.classList.toggle('dark');
+            const d = document.body.classList.contains('dark');
+            themeToggle.textContent = d ? '☀️ Light' : '🌙 Dark';
+            localStorage.setItem('darkMode', d);
+        };
+
+        // Main loader
+        async function load(lat, lon, label) {
+            status.textContent = `📍 ${label || `${lat.toFixed(2)},${lon.toFixed(2)}`}`;
+            goodGrid.innerHTML = '';
+            noTimes.style.display = 'none';
+            const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+                `&hourly=temperature_2m,relative_humidity_2m,uv_index,wind_speed_10m,precipitation_probability&timezone=auto`;
+            try {
+                const { hourly } = await (await fetch(url)).json();
+                const slots = [];
+                for (let i = 0; i < 24; i++) {
+                    const t = Math.round(hourly.temperature_2m[i]);
+                    const h = Math.round(hourly.relative_humidity_2m[i]);
+                    const uv = Math.round(hourly.uv_index[i] * 10) / 10;
+                    const w = Math.round(hourly.wind_speed_10m[i] * 10) / 10;
+                    const p = Math.round(hourly.precipitation_probability[i]);
+                    const tm = hourly.time[i].slice(11, 16);
+                    if (isGood(t, h, uv, w, p)) slots.push({ tm, t, h, uv, w, p });
+                }
+                if (!slots.length) {
+                    noTimes.style.display = 'block';
+                    goodCount.textContent = '🏃‍♂️ No Optimal Times Found';
+                    return;
+                }
+                goodCount.textContent = `🏃‍♂️ ${slots.length} Great Times`;
+                slots.forEach(s => {
+                    const div = document.createElement('div');
+                    div.className = 'slot';
+                    div.innerHTML = `
+        <span class="icon">${getIcon(s.t, s.uv, s.p)}</span>
+        <div class="time">${s.tm}</div>
+        <div class="details">
+          ${s.t}°C<br>💧${s.h}%<br>☀️UV ${s.uv}<br>💨${s.w}m/s<br>🌧️${s.p}%`;
+                    // Calendar link
+                    const [hh, mm] = s.tm.split(':').map(Number);
+                    const start = `${String(hh).padStart(2, '0')}${String(mm).padStart(2, '0')}00`;
+                    const endHour = (hh + 1) % 24;
+                    const end = `${String(endHour).padStart(2, '0')}${String(mm).padStart(2, '0')}00`;
+
+                    const href = `https://calendar.google.com/calendar/r/eventedit?text=Outdoor+Activity` +
+                        `&dates=${date}T${start}/${date}T${end}` +
+                        `&details=Good+time+to+run&location=${lat},${lon}`;
+                    const a = document.createElement('a');
+                    a.href = href; a.target = '_blank'; a.appendChild(div);
+                    goodGrid.appendChild(a);
+                });
+            } catch {
+                status.textContent = '❌ Weather data unavailable';
+            }
+        }
+
+        // Geocode “Go” button
+        locBtn.onclick = async () => {
+            const q = locInput.value.trim();
+            if (!q) return alert('Type a location');
+            const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}`);
+            const js = await res.json();
+            if (!js.length) return alert('Not found');
+            load(js[0].lat, js[0].lon, js[0].display_name);
+        };
+
+        // Initial geolocation
+        navigator.geolocation.getCurrentPosition(
+            pos => load(pos.coords.latitude, pos.coords.longitude),
+            () => alert('Geo denied—enter location and click Go')
+        );
+    </script>
+
+</body>
+
+</html>

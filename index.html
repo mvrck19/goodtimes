@@ -195,7 +195,7 @@
         }
 
         // fetch AQI once
-        async function getAQI(lat, lon, token = 53120cf1f91004ddc3629c7c83cfb00446383ad5) {
+        async function getAQI(lat, lon, token = '53120cf1f91004ddc3629c7c83cfb00446383ad5') {
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
@@ -492,4 +492,5 @@
 </body>
 
 </html>
+
 

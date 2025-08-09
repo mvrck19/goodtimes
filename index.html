@@ -127,6 +127,17 @@
             color: var(--text-color);
             opacity: 0.6;
         }
+
+        @media (max-width: 600px) {
+            .grid {
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            }
+
+            .slot {
+                font-size: 1rem;
+                padding: 1rem;
+            }
+        }
     </style>
 </head>
 
@@ -147,7 +158,7 @@
         </div>
         <div id="goodGrid" class="grid"></div>
         <div id="noTimes" class="no-times" style="display:none;">
-            No optimal times found in the next 24 hours. Check back later!
+            No optimal times found in the next 72 hours. Check back later!
         </div>
     </section>
 
@@ -160,7 +171,87 @@
             return '☀️';
         };
 
-        const isGood = (t, h, uv, w, p) => t >= 10 && t <= 25 && h < 70 && uv < 4 && w < 8 && p < 20;
+        // Heat Index calculation (NOAA formula)
+        function calculateHeatIndex(tempF, humidity) {
+            if (tempF < 80) return tempF;
+
+            const c1 = -42.379, c2 = 2.04901523, c3 = 10.14333127;
+            const c4 = -0.22475541, c5 = -6.83783e-3, c6 = -5.481717e-2;
+            const c7 = 1.22874e-3, c8 = 8.5282e-4, c9 = -1.99e-6;
+
+            const hi = c1 + c2 * tempF + c3 * humidity + c4 * tempF * humidity +
+                c5 * tempF * tempF + c6 * humidity * humidity +
+                c7 * tempF * tempF * humidity + c8 * tempF * humidity * humidity +
+                c9 * tempF * tempF * humidity * humidity;
+            return hi;
+        }
+
+        // Simplified WBGT approximation (without globe temperature)
+        function calculateWBGT(tempC, humidity, windSpeed) {
+            const wetBulb = tempC * Math.atan(0.151977 * Math.sqrt(humidity + 8.313659)) +
+                Math.atan(tempC + humidity) - Math.atan(humidity - 1.676331) +
+                0.00391838 * Math.pow(humidity, 1.5) * Math.atan(0.023101 * humidity) - 4.686035;
+            return 0.7 * wetBulb + 0.2 * tempC + 0.1 * tempC; // Simplified without globe temp
+        }
+
+        // fetch AQI once
+        async function getAQI(lat, lon, token = ${{ secrets.WAQI_TOKEN }}) {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+                
+                const res = await fetch(`https://api.waqi.info/feed/geo:${lat};${lon}/?token=${token}`, {
+                    signal: controller.signal,
+                    headers: {
+                        'Accept': 'application/json',
+                        'Origin': window.location.origin
+                    },
+                    mode: 'cors'
+                });
+                
+                // Log response details for debugging
+                console.log('AQI API Response:', {
+                    status: res.status,
+                    statusText: res.statusText,
+                    headers: Object.fromEntries([...res.headers.entries()])
+                });
+                
+                if (!res.ok) {
+                    console.warn('AQI API error:', res.status, res.statusText);
+                    return 999;
+                }
+                
+                const data = await res.json();
+                clearTimeout(timeoutId);
+                
+                if (!data.data) {
+                    console.warn('Invalid AQI data format:', data);
+                    return 999;
+                }
+                
+                return data.data?.aqi ?? 999;
+            } catch (e) {
+                console.error('AQI fetch error:', e);
+                return 999;
+            }
+        }
+
+        // synchronous per-hour check (no network calls)
+        function isGoodForRunningHourly(tempC, humidity, uv, windSpeed, precipProb, aqi) {
+            const tempF = tempC * 9/5 + 32;
+            const hiF = calculateHeatIndex(tempF, humidity);            // returns °F heat index
+            const hiC = (hiF - 32) * 5/9;
+            const wbgt = calculateWBGT(tempC, humidity, windSpeed);
+            const safe = tempC >= 5 && tempC <= 30 &&
+                        humidity < 75 &&
+                        uv < 6 &&
+                        windSpeed < 15 &&
+                        (aqi === undefined || aqi <= 100) &&
+                        wbgt < 28 &&
+                        (tempF < 80 || hiF < 90);
+            return { safe, metrics: { temp: tempC, humidity, uv, wind: windSpeed, precip: precipProb, aqi, wbgt, heatIndexC: hiC } };
+        };
+
 
         const goodGrid = document.getElementById('goodGrid');
         const status = document.getElementById('summary');
@@ -186,18 +277,134 @@
             noTimes.style.display = 'none';
             const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
             const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-                `&hourly=temperature_2m,relative_humidity_2m,uv_index,wind_speed_10m,precipitation_probability&timezone=auto`;
+                `&hourly=temperature_2m,relative_humidity_2m,uv_index,wind_speed_10m,precipitation_probability` +
+                `&timezone=auto&forecast_days=3`;
+
             try {
-                const { hourly } = await (await fetch(url)).json();
+                // Fetch weather data with timeout and headers
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+                
+                const resp = await fetch(url, { 
+                    signal: controller.signal,
+                    headers: {
+                        'Accept': 'application/json',
+                        'Origin': window.location.origin
+                    },
+                    mode: 'cors'
+                });
+                
+                // Log response details for debugging
+                console.log('Weather API Response:', {
+                    status: resp.status,
+                    statusText: resp.statusText,
+                    headers: Object.fromEntries([...resp.headers.entries()])
+                });
+                
+                if (!resp.ok) throw new Error(`Weather API error: ${resp.status} ${resp.statusText}`);
+                const data = await resp.json();
+                clearTimeout(timeoutId);
+                
+                if (!data.hourly || !Array.isArray(data.hourly.time)) {
+                    throw new Error('Invalid weather data format');
+                }
+                
+                const { hourly } = data;
+                const aqi = await getAQI(lat, lon);   // only once
+
+                // First collect all good slots
+                const tempSlots = [];
+                for (let i = 0; i < Math.min(72, hourly.time.length); i++) {
+                    // Check if we have all required data for this hour
+                    if (hourly.temperature_2m[i] === undefined || 
+                        hourly.relative_humidity_2m[i] === undefined || 
+                        hourly.uv_index[i] === undefined || 
+                        hourly.wind_speed_10m[i] === undefined || 
+                        hourly.precipitation_probability[i] === undefined) {
+                        console.warn(`Missing data for hour ${i}`);
+                        continue;
+                    }
+
+                    const t = hourly.temperature_2m[i];
+                    const h = hourly.relative_humidity_2m[i];
+                    const uv = hourly.uv_index[i];
+                    const w = hourly.wind_speed_10m[i];
+                    const p = hourly.precipitation_probability[i];
+                    const fullTime = hourly.time[i];
+                    const tm = fullTime.slice(11, 16);
+                    const date = fullTime.slice(8, 10) + '/' + fullTime.slice(5, 7);
+
+                    const result = isGoodForRunningHourly(t, h, uv, w, p, aqi);
+                    if (result.safe) {
+                        tempSlots.push({
+                            index: i,
+                            tm,
+                            date,
+                            fullTime,
+                            t: Math.round(t),
+                            h: Math.round(h),
+                            uv: Math.round(uv*10)/10,
+                            w: Math.round(w*10)/10,
+                            p: Math.round(p),
+                            aqi,
+                            wbgt: result.metrics.wbgt,
+                            heatIndex: result.metrics.heatIndexC
+                        });
+                    }
+                }
+
+                // Now group consecutive slots
                 const slots = [];
-                for (let i = 0; i < 24; i++) {
-                    const t = Math.round(hourly.temperature_2m[i]);
-                    const h = Math.round(hourly.relative_humidity_2m[i]);
-                    const uv = Math.round(hourly.uv_index[i] * 10) / 10;
-                    const w = Math.round(hourly.wind_speed_10m[i] * 10) / 10;
-                    const p = Math.round(hourly.precipitation_probability[i]);
-                    const tm = hourly.time[i].slice(11, 16);
-                    if (isGood(t, h, uv, w, p)) slots.push({ tm, t, h, uv, w, p });
+                let currentGroup = [];
+                for (let i = 0; i < tempSlots.length; i++) {
+                    const current = tempSlots[i];
+                    if (currentGroup.length === 0) {
+                        currentGroup.push(current);
+                    } else {
+                        const lastSlot = currentGroup[currentGroup.length - 1];
+                        if (current.index === lastSlot.index + 1) {
+                            currentGroup.push(current);
+                        } else {
+                            // End of a group
+                            slots.push(mergeGroup(currentGroup));
+                            currentGroup = [current];
+                        }
+                    }
+                }
+                if (currentGroup.length > 0) {
+                    slots.push(mergeGroup(currentGroup));
+                }
+
+                function mergeGroup(group) {
+                    if (group.length === 1) return group[0];
+
+                    const first = group[0];
+                    const last = group[group.length - 1];
+                    const avgValues = group.reduce((acc, curr) => ({
+                        t: acc.t + curr.t,
+                        h: acc.h + curr.h,
+                        uv: acc.uv + curr.uv,
+                        w: acc.w + curr.w,
+                        p: acc.p + curr.p,
+                        wbgt: acc.wbgt + curr.wbgt,
+                        heatIndex: acc.heatIndex + curr.heatIndex
+                    }), { t: 0, h: 0, uv: 0, w: 0, p: 0, wbgt: 0, heatIndex: 0 });
+
+                    return {
+                        tm: `${first.tm}-${last.tm}`,
+                        date: first.date === last.date ? first.date : `${first.date}-${last.date}`,
+                        fullTime: first.fullTime,
+                        t: Math.round(avgValues.t / group.length),
+                        h: Math.round(avgValues.h / group.length),
+                        uv: Math.round(avgValues.uv / group.length * 10) / 10,
+                        w: Math.round(avgValues.w / group.length * 10) / 10,
+                        p: Math.round(avgValues.p / group.length),
+                        aqi: first.aqi,
+                        wbgt: avgValues.wbgt / group.length,
+                        heatIndex: avgValues.heatIndex / group.length,
+                        startIndex: first.index,
+                        endIndex: last.index
+                    };
                 }
                 if (!slots.length) {
                     noTimes.style.display = 'block';
@@ -210,14 +417,25 @@
                     div.className = 'slot';
                     div.innerHTML = `
         <span class="icon">${getIcon(s.t, s.uv, s.p)}</span>
-        <div class="time">${s.tm}</div>
+        <div class="time">${s.date}<br>${s.tm}</div>
         <div class="details">
           ${s.t}°C<br>💧${s.h}%<br>☀️UV ${s.uv}<br>💨${s.w}m/s<br>🌧️${s.p}%`;
                     // Calendar link
-                    const [hh, mm] = s.tm.split(':').map(Number);
-                    const start = `${String(hh).padStart(2, '0')}${String(mm).padStart(2, '0')}00`;
-                    const endHour = (hh + 1) % 24;
-                    const end = `${String(endHour).padStart(2, '0')}${String(mm).padStart(2, '0')}00`;
+                    let start, end;
+                    if (s.tm.includes('-')) {
+                        // For grouped times
+                        const [startTime, endTime] = s.tm.split('-');
+                        const [startHH, startMM] = startTime.split(':').map(Number);
+                        const [endHH, endMM] = endTime.split(':').map(Number);
+                        start = `${String(startHH).padStart(2, '0')}${String(startMM).padStart(2, '0')}00`;
+                        end = `${String(endHH).padStart(2, '0')}${String(endMM).padStart(2, '0')}00`;
+                    } else {
+                        // For single hour
+                        const [hh, mm] = s.tm.split(':').map(Number);
+                        start = `${String(hh).padStart(2, '0')}${String(mm).padStart(2, '0')}00`;
+                        const endHour = (hh + 1) % 24;
+                        end = `${String(endHour).padStart(2, '0')}${String(mm).padStart(2, '0')}00`;
+                    }
 
                     const href = `https://calendar.google.com/calendar/r/eventedit?text=Outdoor+Activity` +
                         `&dates=${date}T${start}/${date}T${end}` +
@@ -226,8 +444,31 @@
                     a.href = href; a.target = '_blank'; a.appendChild(div);
                     goodGrid.appendChild(a);
                 });
-            } catch {
-                status.textContent = '❌ Weather data unavailable';
+            } catch (error) {
+                console.error('Weather data error:', error);
+                let errorMessage = '❌ Weather data unavailable. Please check your connection.';
+                
+                if (error.name === 'AbortError') {
+                    errorMessage = '❌ Request timed out. Please try again.';
+                } else if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+                    errorMessage = '❌ Network error. Please check your internet connection.';
+                } else if (error.message.includes('Weather API error')) {
+                    errorMessage = '❌ Weather service error. Please try again later.';
+                } else if (error.message.includes('Invalid weather data')) {
+                    errorMessage = '❌ Received invalid data. Please try again.';
+                }
+                
+                // Log detailed error information
+                console.error('Detailed error info:', {
+                    name: error.name,
+                    message: error.message,
+                    stack: error.stack,
+                    url: url
+                });
+                
+                status.textContent = errorMessage;
+                noTimes.style.display = 'none';
+                goodGrid.innerHTML = '';
             }
         }
 
